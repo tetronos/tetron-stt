@@ -1,0 +1,25 @@
+[package]
+name = "tetron-stt"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MPL-2.0"
+description = "Local CPU speech-to-text dictation: live text in a TUI, typed into the focused window, or served as JSON lines to tetron-wm"
+repository = "https://github.com/tetronos/tetron-stt"
+
+[dependencies]
+# sherpa-onnx with onnxruntime linked statically (prebuilt archives fetched by
+# the -sys build script), so the release is one binary plus models.
+sherpa-onnx = "2.0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+# TUI drawing and raw input; plain cursor writes, no widget framework.
+crossterm = "0.29"
+# SIGUSR1/SIGUSR2 for global hotkeys (toggle / mode) in standalone use.
+signal-hook = "0.3"
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+strip = true
