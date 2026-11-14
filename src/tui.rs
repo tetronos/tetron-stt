@@ -81,29 +81,50 @@ struct Button {
     action: Action,
 }
 
-/// The footer buttons, laid out left to right on the last row. Drawing and
-/// hit-testing both use this, so they can never disagree. Buttons that do not
-/// fit the width are dropped (keys still work).
+/// The footer buttons on the last row. Drawing and hit-testing both use this,
+/// so they can never disagree. Quit is always shown, pinned to the right edge.
+/// When the row is too narrow, labels drop their key hints first, then the
+/// least needed buttons go (Clear, Copy last, Output); keys still work.
 fn buttons(ui: &Ui, w: u16, h: u16) -> Vec<Button> {
     let toggle = if ui.state == State::Listening { "■ Stop" } else { "● Start" };
-    let specs = [
+    let full = [
         (Action::Toggle, format!(" {toggle} [space] ")),
         (Action::Mode, format!(" Mode: {} [m] ", ui.mode.as_str())),
         (Action::Output, format!(" Output: {} [o] ", ui.out.short())),
         (Action::Copy, " Copy last [c] ".to_string()),
         (Action::Clear, " Clear [x] ".to_string()),
-        (Action::Quit, " Quit [q] ".to_string()),
     ];
-    let mut x = 0u16;
+    let short = [
+        (Action::Toggle, format!(" {toggle} ")),
+        (Action::Mode, format!(" {} ", ui.mode.as_str())),
+        (Action::Output, format!(" {} ", ui.out.short())),
+        (Action::Copy, " Copy ".to_string()),
+        (Action::Clear, " Clear ".to_string()),
+    ];
+    let width = |l: &str| l.chars().count() as u16;
+    let row_len = |set: &[(Action, String)], quit: &str| set.iter().map(|(_, l)| width(l) + 1).sum::<u16>() + width(quit);
+    let (mut set, quit) = if row_len(&full, " Quit [q] ") <= w {
+        (full.to_vec(), " Quit [q] ")
+    } else {
+        (short.to_vec(), " Quit ")
+    };
+    // drop from the end (Clear, Copy, Output) until the row fits; Toggle and
+    // Mode stay as long as there is any room
+    while set.len() > 2 && row_len(&set, quit) > w {
+        set.pop();
+    }
+    let y = h.saturating_sub(1);
+    let qx = w.saturating_sub(width(quit));
     let mut v = Vec::new();
-    for (action, label) in specs {
-        let len = label.chars().count() as u16;
-        if x + len > w {
+    let mut x = 0u16;
+    for (action, label) in set {
+        if x + width(&label) >= qx {
             break;
         }
-        v.push(Button { x, y: h.saturating_sub(1), label, action });
-        x += len + 1;
+        x += width(&label) + 1;
+        v.push(Button { x: x - width(&label) - 1, y, label, action });
     }
+    v.push(Button { x: qx, y, label: quit.to_string(), action: Action::Quit });
     v
 }
 
@@ -425,10 +446,19 @@ mod tests {
     }
 
     #[test]
-    fn narrow_terminal_drops_buttons_that_do_not_fit() {
+    fn quit_always_visible_at_right_edge() {
         let u = ui();
-        let bs = buttons(&u, 40, 20);
-        assert!(bs.iter().all(|b| b.x + b.label.chars().count() as u16 <= 40));
-        assert_eq!(bs[0].action, Action::Toggle);
+        for w in [20u16, 40, 60, 80, 120] {
+            let bs = buttons(&u, w, 20);
+            let q = bs.last().unwrap();
+            assert_eq!(q.action, Action::Quit, "width {w}");
+            assert_eq!(q.x + q.label.chars().count() as u16, w, "width {w}");
+            assert_eq!(hit(&u, w, 20, w - 2, 19), Some(Action::Quit), "width {w}");
+            // no overlap between neighbours
+            for p in bs.windows(2) {
+                assert!(p[0].x + p[0].label.chars().count() as u16 <= p[1].x, "overlap at width {w}");
+            }
+        }
+        assert_eq!(buttons(&u, 40, 20)[0].action, Action::Toggle);
     }
 }
