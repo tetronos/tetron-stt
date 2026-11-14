@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- TUI: the bottom bar is a row of mouse buttons (Start/Stop, Mode, Output, Copy last, Clear, Quit), each labelled with its key. A click acts on release over the same button; Start turns into a red Stop while listening. Buttons that do not fit a narrow terminal are dropped; the keys still work.
+
 ## [0.1.0]
 
 First version.

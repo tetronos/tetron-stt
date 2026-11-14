@@ -6,7 +6,10 @@
 
 use crate::engine::{Engine, Event, Input, Mode, Opts, State};
 use crate::output;
-use crossterm::event::{self, Event as TEvent, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event as TEvent, KeyCode, KeyEventKind, KeyModifiers, MouseButton,
+    MouseEventKind,
+};
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::{self, ClearType};
 use crossterm::{cursor, execute, queue};
@@ -29,6 +32,13 @@ impl Out {
             Out::Type => "type into focused window",
             Out::Copy => "copy to clipboard",
             Out::Show => "show only",
+        }
+    }
+    fn short(self) -> &'static str {
+        match self {
+            Out::Type => "type",
+            Out::Copy => "copy",
+            Out::Show => "show",
         }
     }
 }
@@ -54,6 +64,87 @@ pub fn signal_running(sig: i32) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Action {
+    Toggle,
+    Mode,
+    Output,
+    Copy,
+    Clear,
+    Quit,
+}
+
+struct Button {
+    x: u16,
+    y: u16,
+    label: String,
+    action: Action,
+}
+
+/// The footer buttons, laid out left to right on the last row. Drawing and
+/// hit-testing both use this, so they can never disagree. Buttons that do not
+/// fit the width are dropped (keys still work).
+fn buttons(ui: &Ui, w: u16, h: u16) -> Vec<Button> {
+    let toggle = if ui.state == State::Listening { "■ Stop" } else { "● Start" };
+    let specs = [
+        (Action::Toggle, format!(" {toggle} [space] ")),
+        (Action::Mode, format!(" Mode: {} [m] ", ui.mode.as_str())),
+        (Action::Output, format!(" Output: {} [o] ", ui.out.short())),
+        (Action::Copy, " Copy last [c] ".to_string()),
+        (Action::Clear, " Clear [x] ".to_string()),
+        (Action::Quit, " Quit [q] ".to_string()),
+    ];
+    let mut x = 0u16;
+    let mut v = Vec::new();
+    for (action, label) in specs {
+        let len = label.chars().count() as u16;
+        if x + len > w {
+            break;
+        }
+        v.push(Button { x, y: h.saturating_sub(1), label, action });
+        x += len + 1;
+    }
+    v
+}
+
+fn hit(ui: &Ui, w: u16, h: u16, col: u16, row: u16) -> Option<Action> {
+    buttons(ui, w, h)
+        .into_iter()
+        .find(|b| row == b.y && col >= b.x && col < b.x + b.label.chars().count() as u16)
+        .map(|b| b.action)
+}
+
+impl Ui {
+    /// Run one action from a key or a click; true means quit.
+    fn apply(&mut self, a: Action, tx: &Sender<Input>) -> bool {
+        match a {
+            Action::Quit => return true,
+            Action::Toggle => {
+                let _ = tx.send(Input::Toggle);
+            }
+            Action::Mode => {
+                let _ = tx.send(Input::Mode(None));
+            }
+            Action::Output => {
+                self.out = match self.out {
+                    Out::Type => Out::Copy,
+                    Out::Copy => Out::Show,
+                    Out::Show if self.x11 => Out::Type,
+                    Out::Show => Out::Copy,
+                };
+            }
+            Action::Copy => {
+                if let Some(l) = self.history.last() {
+                    output::osc52_copy(l.trim_end_matches(" ⏎").trim_end());
+                    self.status = "last text copied to clipboard".into();
+                }
+            }
+            Action::Clear => self.history.clear(),
+        }
+        false
+    }
+}
+
 struct Ui {
     state: State,
     mode: Mode,
@@ -63,6 +154,8 @@ struct Ui {
     status: String,
     x11: bool,
     own_win: Option<String>,
+    /// Button under a mouse press, drawn pressed until release.
+    pressed: Option<Action>,
 }
 
 fn wrap(s: &str, w: usize) -> Vec<String> {
@@ -96,9 +189,20 @@ impl Ui {
             SetAttribute(Attribute::Reset),
             Print(format!("  mode: {}  output: {}", self.mode.as_str(), self.out.label())),
         )?;
-        // footer: keys + status
-        let keys = " space toggle  m mode  o output  c copy last  x clear  q quit";
-        queue!(o, cursor::MoveTo(0, (h - 1) as u16), SetAttribute(Attribute::Reverse), Print(format!("{keys:w$}").chars().take(w).collect::<String>()), SetAttribute(Attribute::Reset))?;
+        // footer: clickable buttons, each labelled with its key
+        for b in buttons(self, w as u16, h as u16) {
+            let active = self.pressed == Some(b.action);
+            let (fg, bg) = match b.action {
+                Action::Toggle if self.state == State::Listening => (Color::White, Color::Red),
+                Action::Toggle => (Color::Black, Color::Green),
+                _ => (Color::White, Color::DarkGrey),
+            };
+            queue!(o, cursor::MoveTo(b.x, b.y), SetForegroundColor(fg), SetBackgroundColor(bg))?;
+            if active {
+                queue!(o, SetAttribute(Attribute::Reverse))?;
+            }
+            queue!(o, Print(&b.label), SetAttribute(Attribute::Reset), ResetColor)?;
+        }
         if !self.status.is_empty() {
             queue!(o, cursor::MoveTo(0, (h - 2) as u16), SetForegroundColor(Color::DarkGrey), Print(self.status.chars().take(w).collect::<String>()), ResetColor)?;
         }
@@ -169,6 +273,7 @@ pub fn run(o: Opts, autostart: bool) -> Result<(), String> {
         status: String::new(),
         x11,
         own_win: if x11 { output::own_window() } else { None },
+        pressed: None,
     };
     let (etx, erx) = std::sync::mpsc::channel();
     let tx = Engine::spawn(o, etx);
@@ -192,7 +297,7 @@ pub fn run(o: Opts, autostart: bool) -> Result<(), String> {
 
     let mut out = std::io::stdout();
     terminal::enable_raw_mode().map_err(|e| e.to_string())?;
-    execute!(out, terminal::EnterAlternateScreen, cursor::Hide).map_err(|e| e.to_string())?;
+    execute!(out, terminal::EnterAlternateScreen, cursor::Hide, EnableMouseCapture).map_err(|e| e.to_string())?;
     let res = (|| -> std::io::Result<()> {
         let mut dirty = true;
         loop {
@@ -204,33 +309,45 @@ pub fn run(o: Opts, autostart: bool) -> Result<(), String> {
                 match event::read()? {
                     TEvent::Key(k) if k.kind != KeyEventKind::Release => {
                         let ctrl_c = k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c');
-                        match k.code {
-                            _ if ctrl_c => break,
-                            KeyCode::Char('q') | KeyCode::Esc => break,
-                            KeyCode::Char(' ') | KeyCode::Enter => {
-                                let _ = tx.send(Input::Toggle);
-                            }
-                            KeyCode::Char('m') => {
-                                let _ = tx.send(Input::Mode(None));
-                            }
-                            KeyCode::Char('o') => {
-                                ui.out = match ui.out {
-                                    Out::Type => Out::Copy,
-                                    Out::Copy => Out::Show,
-                                    Out::Show if ui.x11 => Out::Type,
-                                    Out::Show => Out::Copy,
-                                };
-                            }
-                            KeyCode::Char('c') => {
-                                if let Some(l) = ui.history.last() {
-                                    output::osc52_copy(l.trim_end_matches(" ⏎").trim_end());
-                                    ui.status = "last text copied to clipboard".into();
-                                }
-                            }
-                            KeyCode::Char('x') => ui.history.clear(),
-                            _ => {}
+                        let act = match k.code {
+                            _ if ctrl_c => Some(Action::Quit),
+                            KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
+                            KeyCode::Char(' ') | KeyCode::Enter => Some(Action::Toggle),
+                            KeyCode::Char('m') => Some(Action::Mode),
+                            KeyCode::Char('o') => Some(Action::Output),
+                            KeyCode::Char('c') => Some(Action::Copy),
+                            KeyCode::Char('x') => Some(Action::Clear),
+                            _ => None,
+                        };
+                        if let Some(a) = act
+                            && ui.apply(a, &tx)
+                        {
+                            break;
                         }
                         dirty = true;
+                    }
+                    TEvent::Mouse(m) => {
+                        // act on release over the same button that was pressed,
+                        // like a GUI button; moving off before release cancels
+                        let (w, h) = terminal::size()?;
+                        let hit = hit(&ui, w, h, m.column, m.row);
+                        match m.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                ui.pressed = hit;
+                                dirty = true;
+                            }
+                            MouseEventKind::Up(MouseButton::Left) => {
+                                let p = ui.pressed.take();
+                                dirty = true;
+                                if let Some(a) = hit
+                                    && p == Some(a)
+                                    && ui.apply(a, &tx)
+                                {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                     TEvent::Resize(..) => dirty = true,
                     _ => {}
@@ -264,7 +381,7 @@ pub fn run(o: Opts, autostart: bool) -> Result<(), String> {
         Ok(())
     })();
     let _ = tx.send(Input::Quit);
-    let _ = execute!(out, cursor::Show, terminal::LeaveAlternateScreen);
+    let _ = execute!(out, DisableMouseCapture, cursor::Show, terminal::LeaveAlternateScreen);
     let _ = terminal::disable_raw_mode();
     if std::fs::read_to_string(&pf).ok().as_deref() == Some(&std::process::id().to_string()) {
         let _ = std::fs::remove_file(&pf);
@@ -273,4 +390,45 @@ pub fn run(o: Opts, autostart: bool) -> Result<(), String> {
         println!("{l}");
     }
     res.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ui() -> Ui {
+        Ui {
+            state: State::Idle,
+            mode: Mode::Segment,
+            out: Out::Copy,
+            partial: String::new(),
+            history: Vec::new(),
+            status: String::new(),
+            x11: false,
+            own_win: None,
+            pressed: None,
+        }
+    }
+
+    #[test]
+    fn every_drawn_button_is_hit_at_its_cells() {
+        let u = ui();
+        let bs = buttons(&u, 120, 20);
+        assert_eq!(bs.len(), 6);
+        for b in &bs {
+            let len = b.label.chars().count() as u16;
+            assert_eq!(hit(&u, 120, 20, b.x, b.y), Some(b.action));
+            assert_eq!(hit(&u, 120, 20, b.x + len - 1, b.y), Some(b.action));
+            assert_eq!(hit(&u, 120, 20, b.x + len, b.y), None, "gap after {:?}", b.action);
+            assert_eq!(hit(&u, 120, 20, b.x, b.y - 1), None);
+        }
+    }
+
+    #[test]
+    fn narrow_terminal_drops_buttons_that_do_not_fit() {
+        let u = ui();
+        let bs = buttons(&u, 40, 20);
+        assert!(bs.iter().all(|b| b.x + b.label.chars().count() as u16 <= 40));
+        assert_eq!(bs[0].action, Action::Toggle);
+    }
 }

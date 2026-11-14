@@ -55,7 +55,7 @@ tetron-stt transcribe talk.wav  # transcript of a file
 tetron-stt --help
 ```
 
-TUI keys:
+TUI keys (each is also a clickable button in the bottom bar; a click acts on release over the same button):
 
 | key | action |
 |---|---|
