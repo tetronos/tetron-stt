@@ -1,0 +1,26 @@
+# Package description for mkdeb (https://github.com/tetronos/tetron-packaging).
+# Built in release CI by the build-deb action. The deb carries the binary only:
+# the speech models (about 0.96 GB, NVIDIA, CC-BY-4.0) are not packaged. They are
+# fetched on first use with `tetron-stt models download`, or a system image
+# pre-seeds them in /usr/share/tetron-stt/models.
+name = "tetron-stt"
+description = "Local CPU speech-to-text dictation for the terminal and tetron-wm"
+long_description = """
+Live speech-to-text on the CPU with sherpa-onnx: text appears in a terminal UI,
+is typed into the focused window, or is served as JSON lines to tetron-wm. The
+binary links sherpa-onnx statically. The models are not part
+of this package: run tetron-stt models download once (about 0.96 GB, resumable,
+checksummed), or use a system directory with the models already in it."""
+section = "sound"
+license = "MPL-2.0"
+homepage = "https://github.com/tetronos/tetron-stt"
+# A recorder is needed to hear the microphone: alsa-utils (arecord), PipeWire
+# (pw-record) or sox (rec). Typing into the focused window uses xdotool on X11,
+# without it the text goes to the clipboard.
+recommends = ["alsa-utils | pipewire | sox", "ffmpeg"]
+smoke = "tetron-stt --version"
+
+[[files]]
+src = "binary"
+dst = "usr/bin/tetron-stt"
+mode = "0755"

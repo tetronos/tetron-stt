@@ -82,8 +82,8 @@ jobs:
           - { os: macos-latest, target: x86_64-apple-darwin }
           # 22.04 on purpose: glibc 2.35 keeps the binary runnable on Debian 12
           # and Ubuntu 22.04+.
-          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, deb_arch: amd64 }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, deb_arch: arm64 }
     steps:
       - uses: actions/checkout@v4
       - name: Verify tag matches Cargo.toml version
@@ -109,3 +109,28 @@ jobs:
           files: |
             tetron-stt-${{ matrix.target }}.tar.gz
             tetron-stt-${{ matrix.target }}.tar.gz.sha256
+      # .deb for Debian-family hosts, built from the exact binary packed above by the
+      # shared build-deb action (pinned to a full commit SHA). The action installs the
+      # deb in a clean debian:trixie container and fails the job before the upload if
+      # that fails; the install test runs only on the runner's native architecture.
+      # Maintainer comes from the repository variable DEB_MAINTAINER. The deb has no
+      # models: they are fetched on first use (tetron-stt models download).
+      - name: Build .deb
+        id: deb
+        if: matrix.deb_arch != ''
+        uses: tetronos/tetron-packaging@87d8405791a0e679af6deb720fe932410f38feb5
+        with:
+          binary: target/${{ matrix.target }}/release/tetron-stt
+          deb-toml: packaging/deb.toml
+          version: ${{ needs.decide.outputs.tag }}
+          arch: ${{ matrix.deb_arch }}
+          maintainer: ${{ vars.DEB_MAINTAINER }}
+          smoke: tetron-stt --version
+      - name: Attach .deb to release
+        if: matrix.deb_arch != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.decide.outputs.tag }}
+          files: |
+            ${{ steps.deb.outputs.deb }}
+            ${{ steps.deb.outputs.sha256 }}
