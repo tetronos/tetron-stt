@@ -38,10 +38,23 @@ pub const MODELS: &[Model] = &[
 
 pub const FILES: &[&str] = &["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"];
 
+/// Models a system image ships (the TetronOS Desktop ISO pre-seeds them here).
+pub const SYSTEM_MODELS_DIR: &str = "/usr/share/tetron-stt/models";
+
+/// The directory models are read from: TETRON_STT_MODELS if set, else the
+/// system directory when it holds every model, else the user's own.
 pub fn models_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("TETRON_STT_MODELS") {
         return d.into();
     }
+    pick_dir(Path::new(SYSTEM_MODELS_DIR), user_models_dir())
+}
+
+fn pick_dir(system: &Path, user: PathBuf) -> PathBuf {
+    if all_installed(system) { system.to_path_buf() } else { user }
+}
+
+fn user_models_dir() -> PathBuf {
     let data = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"));
@@ -168,4 +181,28 @@ pub fn download(json: bool) -> Result<(), String> {
     }
     emit(json, serde_json::json!({"done": true}), "all models installed".into());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_dir_wins_only_when_it_holds_every_model() {
+        let base = std::env::temp_dir().join(format!("tetron-stt-models-test-{}", std::process::id()));
+        let user = PathBuf::from("/home/u/.local/share/tetron-stt/models");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        assert_eq!(pick_dir(&base, user.clone()), user, "empty system dir");
+        for (i, m) in MODELS.iter().enumerate() {
+            for f in FILES {
+                let p = base.join(m.name).join(f);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, b"x").unwrap();
+            }
+            let want = if i + 1 == MODELS.len() { base.clone() } else { user.clone() };
+            assert_eq!(pick_dir(&base, user.clone()), want, "after {} model(s)", i + 1);
+        }
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 }

@@ -37,6 +37,15 @@ tetron-stt models download   # ~0.96 GB, once, resumable, sha256 checked
 tetron-stt doctor
 ```
 
+On Debian, Ubuntu and TetronOS the release also has a `.deb` (amd64, arm64), and the tetronos apt repository carries it once listed there. It holds the binary only, no models: run `tetron-stt models download` after installing, or use a system directory (below).
+
+```sh
+sudo apt install ./tetron-stt_0.15.1-1_amd64.deb
+tetron-stt models download
+```
+
+**System models directory:** if `/usr/share/tetron-stt/models` holds every model, `tetron-stt` uses it before the per-user directory (the TetronOS Desktop image pre-seeds it, so dictation works offline). `TETRON_STT_MODELS` still overrides both. To fill it: `sudo TETRON_STT_MODELS=/usr/share/tetron-stt/models tetron-stt models download`.
+
 From source: `cargo install --git https://github.com/tetronos/tetron-stt`.
 
 Runtime tools:

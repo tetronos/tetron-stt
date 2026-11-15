@@ -40,7 +40,7 @@ Options:
 Spoken symbols: \"slash\" /, \"underscore\" _, \"dot\" ., \"dash\"/\"hyphen\" -.
 
 Environment:
-  TETRON_STT_MODELS      models directory (default ~/.local/share/tetron-stt/models)
+  TETRON_STT_MODELS      models directory (default /usr/share/tetron-stt/models when it holds every model, else ~/.local/share/tetron-stt/models)
   TETRON_STT_AUDIO_CMD   recorder writing raw s16le mono 16 kHz to stdout
                          (default: first of arecord, pw-record, rec)
 ";

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.15.1]
+
+- Release: a `.deb` for amd64 and arm64 is built in the release workflow with the shared build-deb action and attached to the release (binary only, the models are not packaged).
+- Models: `/usr/share/tetron-stt/models` is used before the per-user directory when it holds every model, so a system image can ship them. `TETRON_STT_MODELS` still overrides.
+
 ## [0.15.0]
 
 Version follows the tetron core minor (0.15), like the rest of the suite; 0.1.0 was the first release under the wrong number.
