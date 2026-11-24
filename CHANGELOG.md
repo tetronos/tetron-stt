@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- TUI types into the focused window inside tetron-wm with `tetron-wm type` (no X11 needed). From the TUI's own window tetron-wm puts the text on its clipboard. X11 still uses xdotool; without either the TUI copies with OSC 52. `tetron-stt doctor` names the typer in use.
+
 ## [0.15.1]
 
 - Release: a `.deb` for amd64 and arm64 is built in the release workflow with the shared build-deb action and attached to the release (binary only, the models are not packaged).

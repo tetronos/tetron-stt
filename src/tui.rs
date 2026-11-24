@@ -150,7 +150,7 @@ impl Ui {
                 self.out = match self.out {
                     Out::Type => Out::Copy,
                     Out::Copy => Out::Show,
-                    Out::Show if self.x11 => Out::Type,
+                    Out::Show if self.typer != output::Typer::None => Out::Type,
                     Out::Show => Out::Copy,
                 };
             }
@@ -173,7 +173,7 @@ struct Ui {
     partial: String,
     history: Vec<String>,
     status: String,
-    x11: bool,
+    typer: output::Typer,
     own_win: Option<String>,
     /// Button under a mouse press, drawn pressed until release.
     pressed: Option<Action>,
@@ -247,7 +247,7 @@ impl Ui {
             queue!(o, cursor::MoveTo(0, (2 + i) as u16), Print(l))?;
         }
         if self.history.is_empty() && room > 2 {
-            let hint = if self.x11 {
+            let hint = if self.typer != output::Typer::None {
                 "Start, then focus the target window: text is typed there. Global hotkey: tetron-stt toggle / tetron-stt mode"
             } else {
                 "Start and speak; committed text is copied to the clipboard. Global hotkey: tetron-stt toggle / tetron-stt mode"
@@ -270,7 +270,8 @@ impl Ui {
                 "copied to clipboard".into()
             }
             Out::Type => {
-                let active = output::active_window();
+                // tetron-wm checks the focus itself (own window: its clipboard).
+                let active = if self.typer == output::Typer::X11 { output::active_window() } else { None };
                 if active.is_some() && active == self.own_win {
                     output::osc52_copy(text.trim_end());
                     "this window has focus: copied to clipboard instead of typing".into()
@@ -284,16 +285,16 @@ impl Ui {
 }
 
 pub fn run(o: Opts, autostart: bool) -> Result<(), String> {
-    let x11 = output::x11_available();
+    let how = output::typer();
     let mut ui = Ui {
         state: State::Idle,
         mode: o.mode,
-        out: if x11 { Out::Type } else { Out::Copy },
+        out: if how != output::Typer::None { Out::Type } else { Out::Copy },
         partial: String::new(),
         history: Vec::new(),
         status: String::new(),
-        x11,
-        own_win: if x11 { output::own_window() } else { None },
+        typer: how,
+        own_win: if how == output::Typer::X11 { output::own_window() } else { None },
         pressed: None,
     };
     let (etx, erx) = std::sync::mpsc::channel();
@@ -304,12 +305,12 @@ pub fn run(o: Opts, autostart: bool) -> Result<(), String> {
     signal_hook::flag::register(signal_hook::consts::SIGUSR2, usr2.clone()).map_err(|e| e.to_string())?;
     let pf = pid_file();
     let _ = std::fs::write(&pf, std::process::id().to_string());
-    // typing runs on its own thread so a slow xdotool never stalls the UI;
+    // typing runs on its own thread so a slow typer never stalls the UI;
     // the channel keeps segments in order
     let (typer, trx) = std::sync::mpsc::channel::<(String, bool)>();
     std::thread::spawn(move || {
         for (t, enter) in trx {
-            output::xtype(&t, enter);
+            output::type_text(how, &t, enter);
         }
     });
     if autostart {
@@ -425,7 +426,7 @@ mod tests {
             partial: String::new(),
             history: Vec::new(),
             status: String::new(),
-            x11: false,
+            typer: output::Typer::None,
             own_win: None,
             pressed: None,
         }

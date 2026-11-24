@@ -1,7 +1,7 @@
-//! Where committed text goes in standalone (TUI) use: typed into the focused
-//! X11 window with xdotool, or copied to the clipboard with OSC 52 (works in
-//! most terminals, also over ssh). Inside tetron-wm, `serve` is used instead
-//! and tetron-wm pastes into the focused app itself.
+//! Where the TUI's committed text goes: typed into the focused window, inside a
+//! tetron-wm session with `tetron-wm type` (no X11 needed; from the TUI's own
+//! window tetron-wm puts it on its clipboard instead), on X11 with xdotool, else
+//! copied to the clipboard with OSC 52 (works in most terminals, also over ssh).
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -20,6 +20,59 @@ fn run(args: &[&str]) -> Option<String> {
     let _ = child.kill();
     let _ = child.wait();
     None
+}
+
+/// How the TUI can type into other windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Typer {
+    /// Inside a tetron-wm session: `tetron-wm type`.
+    TetronWm,
+    /// X11 with xdotool.
+    X11,
+    /// No way to type: copy instead.
+    None,
+}
+
+/// tetron-wm first (its app windows carry TETRON_WM_SESSION), then X11.
+pub fn typer() -> Typer {
+    if std::env::var_os("TETRON_WM_SESSION").is_some() && crate::engine::in_path("tetron-wm") {
+        Typer::TetronWm
+    } else if x11_available() {
+        Typer::X11
+    } else {
+        Typer::None
+    }
+}
+
+/// Type `text` (then Enter) with the given typer.
+pub fn type_text(t: Typer, text: &str, enter: bool) -> bool {
+    match t {
+        Typer::TetronWm => wmtype("tetron-wm", text, enter),
+        Typer::X11 => xtype(text, enter),
+        Typer::None => false,
+    }
+}
+
+/// `PROG type [--enter]` with the text on stdin (never parsed as options).
+fn wmtype(prog: &str, text: &str, enter: bool) -> bool {
+    let mut cmd = Command::new(prog);
+    cmd.arg("type");
+    if enter {
+        cmd.arg("--enter");
+    }
+    let Ok(mut child) = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { return false };
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(text.as_bytes());
+    }
+    for _ in 0..100 {
+        if let Ok(Some(st)) = child.try_wait() {
+            return st.success();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    false
 }
 
 pub fn x11_available() -> bool {
@@ -72,6 +125,20 @@ pub fn osc52_copy(text: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wmtype_sends_text_on_stdin_and_enter_as_a_flag() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("stt-wmtype-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let (prog, out) = (d.join("fake-tetron-wm"), d.join("out"));
+        std::fs::write(&prog, format!("#!/bin/sh\necho \"$*\" > '{0}'\ncat >> '{0}'\n", out.display())).unwrap();
+        std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(super::wmtype(prog.to_str().unwrap(), "--enter is text", true));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "type --enter\n--enter is text");
+        assert!(!super::wmtype("/nonexistent/tetron-wm", "x", false));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn base64_padding() {
         assert_eq!(super::base64(b"a"), "YQ==");
