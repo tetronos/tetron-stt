@@ -73,9 +73,9 @@ pub const MAX_BACKLOG: usize = 50;
 
 /// Final mode decodes a whole utterance at once: past this much audio it is
 /// committed at the next pause and listening goes on (a new utterance) ...
-const FINAL_SOFT: f32 = 270.0;
+const FINAL_SOFT: f32 = 60.0;
 /// ... and here at the latest, pause or not.
-const FINAL_HARD: f32 = 300.0;
+const FINAL_HARD: f32 = 90.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum State {
