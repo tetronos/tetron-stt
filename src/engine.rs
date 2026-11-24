@@ -18,6 +18,8 @@ use sherpa_onnx::{
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -60,7 +62,20 @@ pub enum Input {
     Quit,
     Audio(Vec<f32>),
     AudioEnd(String),
+    /// The recorder dropped audio: the engine fell more than [`MAX_BACKLOG`] behind.
+    AudioDropped,
 }
+
+/// Audio chunks (100 ms each) that may wait for the engine: 5 s. Beyond that the
+/// recorder drops new audio instead of queueing it without bound (memory and
+/// latency would grow while recognition is slower than real time).
+pub const MAX_BACKLOG: usize = 50;
+
+/// Final mode decodes a whole utterance at once: past this much audio it is
+/// committed at the next pause and listening goes on (a new utterance) ...
+const FINAL_SOFT: f32 = 270.0;
+/// ... and here at the latest, pause or not.
+const FINAL_HARD: f32 = 300.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum State {
@@ -137,7 +152,10 @@ pub fn file_audio_cmd(file: &str) -> Vec<String> {
 
 struct Models {
     live: OnlineRecognizer,
-    fin: OfflineRecognizer,
+    /// Loaded only for final mode, and dropped after a stop's final pass:
+    /// onnxruntime keeps a long decode's buffers in its own pool until the
+    /// session is gone.
+    fin: Option<OfflineRecognizer>,
 }
 
 fn load(o: &Opts) -> Result<Models, String> {
@@ -154,6 +172,11 @@ fn load(o: &Opts) -> Result<Models, String> {
     c.model_config.model_type = Some("nemo_transducer".into());
     c.decoding_method = Some("greedy_search".into());
     let live = OnlineRecognizer::create(&c).ok_or("could not load the live model")?;
+    Ok(Models { live, fin: None })
+}
+
+fn load_final(o: &Opts) -> Result<OfflineRecognizer, String> {
+    let p = |role: &str, f: &str| Some(models::model_path(&o.models_dir, role).join(f).to_string_lossy().into_owned());
     let mut f = OfflineRecognizerConfig::default();
     f.model_config.transducer.encoder = p("final", "encoder.int8.onnx");
     f.model_config.transducer.decoder = p("final", "decoder.int8.onnx");
@@ -162,11 +185,30 @@ fn load(o: &Opts) -> Result<Models, String> {
     f.model_config.num_threads = o.threads;
     f.model_config.model_type = Some("nemo_transducer".into());
     f.decoding_method = Some("greedy_search".into());
-    let fin = OfflineRecognizer::create(&f).ok_or("could not load the final model")?;
-    Ok(Models { live, fin })
+    OfflineRecognizer::create(&f).ok_or_else(|| "could not load the final model".to_string())
 }
 
-fn spawn_recorder(cmd: &[String], tx: Sender<Input>) -> Result<Child, String> {
+/// Hand freed memory back to the system. A final pass over a long utterance
+/// allocates gigabytes; glibc keeps freed blocks in the process otherwise.
+fn release_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+/// One less, never below zero (a stale chunk after a restart reset the count).
+fn dec_saturating(a: &AtomicUsize) {
+    let mut n = a.load(Ordering::Relaxed);
+    while n > 0 {
+        match a.compare_exchange_weak(n, n - 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(now) => n = now,
+        }
+    }
+}
+
+fn spawn_recorder(cmd: &[String], tx: Sender<Input>, backlog: Arc<AtomicUsize>) -> Result<Child, String> {
     let mut child = Command::new(&cmd[0])
         .args(&cmd[1..])
         .stdin(Stdio::null())
@@ -181,7 +223,14 @@ fn spawn_recorder(cmd: &[String], tx: Sender<Input>) -> Result<Child, String> {
         loop {
             match out.read_exact(&mut buf) {
                 Ok(()) => {
+                    if backlog.load(Ordering::Relaxed) >= MAX_BACKLOG {
+                        if tx.send(Input::AudioDropped).is_err() {
+                            return;
+                        }
+                        continue;
+                    }
                     let a = buf.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b) as f32 / 32768.0).collect();
+                    backlog.fetch_add(1, Ordering::Relaxed);
                     if tx.send(Input::Audio(a)).is_err() {
                         return;
                     }
@@ -198,7 +247,12 @@ fn spawn_recorder(cmd: &[String], tx: Sender<Input>) -> Result<Child, String> {
 
 struct Utt {
     stream: OnlineStream,
+    /// The utterance's audio, kept only in final mode (for the final pass).
     audio: Vec<f32>,
+    /// Samples heard since listening started: the clock for pause detection.
+    samples: usize,
+    /// Audio was dropped (backlog) and the user was told, once per utterance.
+    dropped: bool,
     mode: Mode,
     rec: Child,
     /// Bumped per recorder so a late AudioEnd from a killed one is ignored.
@@ -222,6 +276,8 @@ pub struct Engine {
     mode: Mode,
     last_active: Instant,
     epoch: u64,
+    /// Chunks the recorder sent that the engine has not taken yet.
+    backlog: Arc<AtomicUsize>,
 }
 
 impl Engine {
@@ -229,7 +285,7 @@ impl Engine {
     /// UI, signals and tests).
     pub fn spawn(o: Opts, ev: Sender<Event>) -> Sender<Input> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let e = Engine { mode: o.mode, o, tx: tx.clone(), ev, models: None, utt: None, last_active: Instant::now(), epoch: 0 };
+        let e = Engine { mode: o.mode, o, tx: tx.clone(), ev, models: None, utt: None, last_active: Instant::now(), epoch: 0, backlog: Arc::new(AtomicUsize::new(0)) };
         std::thread::spawn(move || e.run(rx));
         tx
     }
@@ -250,6 +306,7 @@ impl Engine {
                         && self.last_active.elapsed().as_secs() >= self.o.idle_unload
                     {
                         self.models = None;
+                        release_memory();
                         let _ = self.ev.send(Event::Info("models unloaded (idle)".into()));
                     }
                     continue;
@@ -275,7 +332,16 @@ impl Engine {
                     self.stop();
                     break;
                 }
-                Input::Audio(a) => self.audio(a),
+                Input::Audio(a) => {
+                    dec_saturating(&self.backlog);
+                    self.audio(a);
+                }
+                Input::AudioDropped => {
+                    if let Some(u) = self.utt.as_mut().filter(|u| !u.dropped) {
+                        u.dropped = true;
+                        let _ = self.ev.send(Event::Info("falling behind: some audio was dropped (CPU too slow? try --threads or segment mode)".into()));
+                    }
+                }
                 Input::AudioEnd(name) => {
                     // a recorder that ends on its own: end of a test file, or a mic error
                     if let Some(u) = &self.utt
@@ -308,8 +374,20 @@ impl Engine {
                 }
             }
         }
+        if self.mode == Mode::Final && self.models.as_ref().is_some_and(|m| m.fin.is_none()) {
+            self.state(State::Loading);
+            match load_final(&self.o) {
+                Ok(f) => self.models.as_mut().unwrap().fin = Some(f),
+                Err(e) => {
+                    let _ = self.ev.send(Event::Error(e));
+                    self.state(State::Idle);
+                    return;
+                }
+            }
+        }
         self.epoch += 1;
-        let rec = match spawn_recorder(&self.o.audio_cmd, self.tx.clone()) {
+        self.backlog.store(0, Ordering::Relaxed);
+        let rec = match spawn_recorder(&self.o.audio_cmd, self.tx.clone(), self.backlog.clone()) {
             Ok(r) => r,
             Err(e) => {
                 let _ = self.ev.send(Event::Error(format!("recorder: {e}")));
@@ -318,7 +396,7 @@ impl Engine {
             }
         };
         let stream = self.models.as_ref().unwrap().live.create_stream();
-        self.utt = Some(Utt { stream, audio: Vec::new(), mode: self.mode, rec, epoch: self.epoch, committed: 0, last_len: 0, changed_at: 0.0 });
+        self.utt = Some(Utt { stream, audio: Vec::new(), samples: 0, dropped: false, mode: self.mode, rec, epoch: self.epoch, committed: 0, last_len: 0, changed_at: 0.0 });
         self.last_active = Instant::now();
         self.state(State::Listening);
     }
@@ -341,7 +419,10 @@ impl Engine {
         if u.epoch != self.epoch {
             return;
         }
-        u.audio.extend_from_slice(&a);
+        if u.mode == Mode::Final {
+            u.audio.extend_from_slice(&a);
+        }
+        u.samples += a.len();
         u.stream.accept_waveform(SR, &a);
         while m.live.is_ready(&u.stream) {
             m.live.decode(&u.stream);
@@ -352,7 +433,7 @@ impl Engine {
         // only grows, so a segment is the text added since the last commit,
         // committed once the text has not changed for `pause` seconds.
         let raw = m.live.get_result(&u.stream).map(|r| r.text).unwrap_or_default();
-        let now = u.audio.len() as f32 / SR as f32;
+        let now = u.samples as f32 / SR as f32;
         if raw.len() != u.last_len {
             u.last_len = raw.len();
             u.changed_at = now;
@@ -370,6 +451,26 @@ impl Engine {
         if u.mode == Mode::Segment && quiet >= RESET_AFTER && !raw.is_empty() && u.committed == raw.len() {
             m.live.reset(&u.stream);
             (u.committed, u.last_len) = (0, 0);
+        }
+        // Final mode: a long utterance is committed in pieces, at a pause past
+        // FINAL_SOFT or at FINAL_HARD, and listening goes on.
+        let held = u.audio.len() as f32 / SR as f32;
+        if let (Mode::Final, Some(fin)) = (u.mode, m.fin.as_ref())
+            && (held >= FINAL_HARD || (held >= FINAL_SOFT && quiet >= self.o.pause))
+        {
+            let audio = std::mem::take(&mut u.audio);
+            m.live.reset(&u.stream);
+            (u.committed, u.last_len) = (0, 0);
+            let s = fin.create_stream();
+            s.accept_waveform(SR, &audio);
+            fin.decode(&s);
+            let text = s.get_result().map(|r| r.text).unwrap_or_default();
+            drop(s);
+            drop(audio);
+            release_memory();
+            let _ = self.ev.send(Event::Partial(String::new()));
+            self.commit(&text, true);
+            return;
         }
         let partial = if commit.is_some() { String::new() } else { new };
         let _ = self.ev.send(Event::Partial(partial));
@@ -400,17 +501,63 @@ impl Engine {
                 self.commit(&tail, false);
             }
             Mode::Final => {
-                if !u.audio.is_empty() {
-                    let s = m.fin.create_stream();
+                if let (false, Some(fin)) = (u.audio.is_empty(), m.fin.as_ref()) {
+                    let s = fin.create_stream();
                     s.accept_waveform(SR, &u.audio);
-                    m.fin.decode(&s);
+                    fin.decode(&s);
                     let text = s.get_result().map(|r| r.text).unwrap_or_default();
+                    drop(s);
                     self.commit(&text, false);
                 }
+                u.audio = Vec::new();
+                // the final model and its pool go; the next final start loads it
+                if let Some(m) = self.models.as_mut() {
+                    m.fin = None;
+                }
+                release_memory();
             }
         }
         let _ = self.ev.send(Event::Partial(String::new()));
         self.last_active = Instant::now();
         self.state(State::Idle);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_recorder_faster_than_the_engine_is_capped_not_queued() {
+        // 20 s of audio at once, nobody taking it: at most MAX_BACKLOG chunks wait
+        let (tx, rx) = std::sync::mpsc::channel();
+        let backlog = Arc::new(AtomicUsize::new(0));
+        let cmd: Vec<String> = ["head", "-c", "640000", "/dev/zero"].iter().map(|s| s.to_string()).collect();
+        let mut child = spawn_recorder(&cmd, tx, backlog.clone()).unwrap();
+        let _ = child.wait();
+        let (mut audio, mut dropped, mut end) = (0, 0, false);
+        while let Ok(m) = rx.recv_timeout(Duration::from_secs(2)) {
+            match m {
+                Input::Audio(_) => audio += 1,
+                Input::AudioDropped => dropped += 1,
+                Input::AudioEnd(_) => {
+                    end = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(end, "the recorder's end still arrives");
+        assert_eq!(audio, MAX_BACKLOG, "only the backlog limit is queued");
+        assert_eq!(audio + dropped, 200, "every 100 ms chunk is either queued or dropped");
+        assert_eq!(backlog.load(Ordering::Relaxed), MAX_BACKLOG);
+    }
+
+    #[test]
+    fn the_backlog_count_never_goes_below_zero() {
+        let a = AtomicUsize::new(1);
+        dec_saturating(&a);
+        dec_saturating(&a);
+        assert_eq!(a.load(Ordering::Relaxed), 0);
     }
 }
