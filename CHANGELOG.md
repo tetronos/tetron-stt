@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - The TUI is tetron-wm's dictation engine: inside tetron-wm it reports its state (`tetron-wm dictation-state`) so the tray mic follows it; tetron-wm opens and toggles it.
+- Memory: audio is kept only in final mode; a recorder faster than the engine is capped at 5 s of backlog (audio dropped with a note) instead of queueing without bound; final mode commits a long utterance in pieces (at a pause past 4.5 min, at 5 min at the latest) and keeps listening; the final model loads only for final mode and is unloaded after a stop, so its decode memory goes back to the system (90 s utterance: 2.5 GB kept before, 0.76 GB now).
 - X11: the own-window check falls back to the X input focus when there is no window manager.
 - TUI types into the focused window inside tetron-wm with `tetron-wm type` (no X11 needed). From the TUI's own window tetron-wm puts the text on its clipboard. X11 still uses xdotool; without either the TUI copies with OSC 52. `tetron-stt doctor` names the typer in use.
 
