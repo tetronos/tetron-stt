@@ -385,6 +385,9 @@ pub fn run(o: Opts, autostart: bool) -> Result<(), String> {
                 dirty = true;
                 match e {
                     Event::State(s, m) => {
+                        if ui.typer == output::Typer::TetronWm {
+                            output::report_state(s.as_str(), m.as_str());
+                        }
                         ui.state = s;
                         ui.mode = m;
                     }
@@ -403,6 +406,9 @@ pub fn run(o: Opts, autostart: bool) -> Result<(), String> {
         Ok(())
     })();
     let _ = tx.send(Input::Quit);
+    if ui.typer == output::Typer::TetronWm {
+        output::report_state("idle", ui.mode.as_str());
+    }
     let _ = execute!(out, DisableMouseCapture, cursor::Show, terminal::LeaveAlternateScreen);
     let _ = terminal::disable_raw_mode();
     if std::fs::read_to_string(&pf).ok().as_deref() == Some(&std::process::id().to_string()) {

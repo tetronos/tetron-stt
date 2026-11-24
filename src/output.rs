@@ -54,6 +54,18 @@ pub fn type_text(t: Typer, text: &str, enter: bool) -> bool {
     }
 }
 
+/// Tell tetron-wm the TUI's state for the tray mic (`tetron-wm dictation-state`).
+/// In the background: never blocks the UI.
+pub fn report_state(state: &str, mode: &str) {
+    let _ = Command::new("tetron-wm")
+        .args(["dictation-state", state, mode])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|mut c| std::thread::spawn(move || c.wait()));
+}
+
 /// `PROG type [--enter]` with the text on stdin (never parsed as options).
 fn wmtype(prog: &str, text: &str, enter: bool) -> bool {
     let mut cmd = Command::new(prog);

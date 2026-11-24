@@ -6,7 +6,8 @@ Part of the tetron suite, and useful on its own:
 
 - **TUI**: run `tetron-stt` in any terminal. It shows the live text as you speak and a history of what was committed, and toggles with the space bar.
 - **Global hotkey**: bind `tetron-stt toggle` and `tetron-stt mode` to desktop shortcuts and dictate into any focused window.
-- **Provider for tetron-wm**: `tetron-stt serve` speaks JSON lines on stdin/stdout. tetron-wm starts it, shows the live text and pastes commits into the focused app.
+- **Dictation of tetron-wm**: the TUI is the engine. A click on the tray mic (or the dictation key) opens it listening in the background, or toggles it when it runs; right-click for Show, Start/Stop, Mode and Settings. The TUI types into the focused window with `tetron-wm type` and reports its state to the tray (tetron-wm 0.15.24 or later).
+- **Provider protocol**: `tetron-stt serve` speaks JSON lines on stdin/stdout, for other programs (and tetron-wm with a custom `dictation_command`).
 
 ## How it works
 

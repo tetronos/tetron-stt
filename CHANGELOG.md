@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- The TUI is tetron-wm's dictation engine: inside tetron-wm it reports its state (`tetron-wm dictation-state`) so the tray mic follows it; tetron-wm opens and toggles it.
+- X11: the own-window check falls back to the X input focus when there is no window manager.
 - TUI types into the focused window inside tetron-wm with `tetron-wm type` (no X11 needed). From the TUI's own window tetron-wm puts the text on its clipboard. X11 still uses xdotool; without either the TUI copies with OSC 52. `tetron-stt doctor` names the typer in use.
 
 ## [0.15.1]
