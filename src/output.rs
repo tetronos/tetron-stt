@@ -80,8 +80,10 @@ pub fn x11_available() -> bool {
     std::env::var_os("DISPLAY").is_some() && crate::engine::in_path("xdotool")
 }
 
+/// The window with focus: the window manager's active window, else the X
+/// input focus (no window manager, or one without _NET_ACTIVE_WINDOW).
 pub fn active_window() -> Option<String> {
-    run(&["xdotool", "getactivewindow"])
+    run(&["xdotool", "getactivewindow"]).or_else(|| run(&["xdotool", "getwindowfocus"]))
 }
 
 /// The window of the terminal running the TUI, so its own key presses are
