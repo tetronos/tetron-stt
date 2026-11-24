@@ -110,7 +110,11 @@ fn doctor(o: &Opts) -> bool {
     check(o.threads >= 1, format!("threads: {} per model ({cores} cores)", o.threads));
     println!(
         "info  typing: {}",
-        if output::x11_available() { "xdotool on X11" } else { "no X11 + xdotool: the TUI copies to the clipboard instead" }
+        match output::typer() {
+            output::Typer::TetronWm => "tetron-wm type (tetron-wm session)",
+            output::Typer::X11 => "xdotool on X11",
+            output::Typer::None => "no tetron-wm session and no X11 + xdotool: the TUI copies to the clipboard instead",
+        }
     );
     println!("info  ffmpeg (--file, transcribe): {}", if engine::in_path("ffmpeg") { "found" } else { "missing" });
     if !engine::in_path(&o.audio_cmd[0]) {

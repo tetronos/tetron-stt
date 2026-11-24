@@ -50,7 +50,7 @@ From source: `cargo install --git https://github.com/tetronos/tetron-stt`.
 
 Runtime tools:
 - **Recorder:** one of `arecord` (alsa-utils), `pw-record` (PipeWire) or `rec` (sox).
-- **Typing into the focused window:** `xdotool` (X11). Without it, the TUI copies committed text to the clipboard with OSC 52.
+- **Typing into the focused window:** inside tetron-wm, `tetron-wm type` (tetron-wm 0.15.24 or later, no X11 needed); on X11, `xdotool`. Without either, the TUI copies committed text to the clipboard with OSC 52.
 - **Optional:** `ffmpeg`, for `--file` and `transcribe`.
 
 ## Use
