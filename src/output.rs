@@ -47,7 +47,8 @@ pub fn typer() -> Typer {
 /// Type `text` (then Enter) with the given typer.
 pub fn type_text(t: Typer, text: &str, enter: bool) -> bool {
     match t {
-        Typer::TetronWm => wmtype("tetron-wm", text, enter),
+        // no daemon answering (a stale TETRON_WM_SESSION): X11 when there is one
+        Typer::TetronWm => wmtype("tetron-wm", text, enter) || (x11_available() && xtype(text, enter)),
         Typer::X11 => xtype(text, enter),
         Typer::None => false,
     }
